@@ -37,7 +37,7 @@ struct VSOutput
 struct MRT
 {
 	float3 Color : SV_Target0;
-	float3 Normal : SV_Target1;
+	float4 Normal : SV_Target1;	// float3 -> float4 due to Raytracing Reflection
 };
 
 [RootSignature(Renderer_RootSig)]
@@ -79,7 +79,8 @@ MRT main(VSOutput vsOutput)
 		vsOutput.worldPos
 		);
 
-	mrt.Normal = normal;
+	float reflectivity = specularMask > 0.1f ? 1.0f : 0.0f;
+	mrt.Normal = float4(normal, reflectivity); // normal -> float4(normal, reflectivity) due to Raytracing Reflection
 	mrt.Color = colorSum;
 	return mrt;
 }
