@@ -29,6 +29,8 @@ struct PathTraceRayPayload
     float3  worldPos;
     float3  normal;
     uint    isHit;
+	float   roughness;
+    float   metalic;
 };
 
 #ifdef HLSL
