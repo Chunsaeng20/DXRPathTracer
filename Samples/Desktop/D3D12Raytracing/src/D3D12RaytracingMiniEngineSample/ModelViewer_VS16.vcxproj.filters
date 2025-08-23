@@ -32,7 +32,12 @@
     <FxCompile Include="RayGenerationShaderLib.hlsl" />
     <FxCompile Include="RayGenerationShaderSSRLib.hlsl" />
     <FxCompile Include="RayGenerationShadowsLib.hlsl" />
-    <FxCompile Include="*Lib.hlsl" />
+    <FxCompile Include="hitShaderLib.hlsl" />
+    <FxCompile Include="missShaderLib.hlsl" />
+    <FxCompile Include="missShadowsLib.hlsl" />
+    <FxCompile Include="RayGenerationShaderLib.hlsl" />
+    <FxCompile Include="RayGenerationShaderSSRLib.hlsl" />
+    <FxCompile Include="RayGenerationShadowsLib.hlsl" />
     <FxCompile Include="*Lib.hlsl">
       <Filter>Shaders</Filter>
     </FxCompile>
@@ -219,6 +224,10 @@
     <FxCompile Include="*Lib.hlsl" />
     <FxCompile Include="*Lib.hlsl" />
     <FxCompile Include="*Lib.hlsl" />
+    <FxCompile Include="PathTraceRayGen.hlsl" />
+    <FxCompile Include="PathTraceHit.hlsl" />
+    <FxCompile Include="PathTraceMiss.hlsl" />
+    <FxCompile Include="DenoiseCS.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ModelViewer.cpp" />

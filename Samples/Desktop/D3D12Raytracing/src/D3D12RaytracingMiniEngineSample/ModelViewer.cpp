@@ -47,6 +47,10 @@
 #include "CompiledShaders/DiffuseHitShaderLib.h"
 #include "CompiledShaders/RayGenerationShadowsLib.h"
 #include "CompiledShaders/MissShadowsLib.h"
+#include "CompiledShaders/PathTraceRayGen.h"
+#include "CompiledShaders/PathTraceHit.h"
+#include "CompiledShaders/PathTraceMiss.h"
+#include "CompiledShaders/DenoiseCS.h"
 
 #include "RaytracingHlslCompat.h"
 #include "ModelViewerRayTracing.h"
@@ -94,6 +98,7 @@ enum RaytracingTypes
     Shadows,
     DiffuseHitShader,
     Reflection,
+    PathTrace, // Path trace
     NumTypes
 };
 
@@ -191,6 +196,12 @@ private:
     void RaytraceShadows(GraphicsContext& context, const Math::Camera& camera, ColorBuffer& colorTarget, DepthBuffer& depth);
     void RaytraceReflections(GraphicsContext& context, const Math::Camera& camera, ColorBuffer& colorTarget, DepthBuffer& depth, ColorBuffer& normals);
 
+	// --- Path tracing methods ---
+    // Render the scene using path tracing
+	void Pathtrace(GraphicsContext& context, const Math::Camera& camera, ColorBuffer& colorTarget, DepthBuffer& depth, ColorBuffer& normals);
+    // Apply a denoising pass to the input buffer and output the result to the output buffer
+	void ApplyDenoisePass(GraphicsContext& context, ColorBuffer& input, ColorBuffer& output);
+
     Camera m_Camera;
     std::unique_ptr<FlyingFPSCamera> m_CameraController;
     D3D12_VIEWPORT m_MainViewport;
@@ -205,6 +216,10 @@ private:
 
     CameraPosition m_CameraPosArray[c_NumCameraPositions];
     UINT m_CameraPosArrayCurrentPosition;
+
+	// Denoising resources for path tracing
+    RootSignature m_DenoiseRS;
+	ComputePSO m_DenoisePSO;
 
 };
 
@@ -262,7 +277,10 @@ const char* rayTracingModes[] = {
     "Shadow Rays", 
     "Diffuse&ShadowMaps",
     "Diffuse&ShadowRays",
-    "Reflection Rays"};
+    "Reflection Rays",
+    "Path Trace",                       // Path trace
+	"Path Trace + Denoise (Blur)"       // Denoised path trace
+};
 enum RaytracingMode
 {
     RTM_OFF,
@@ -272,8 +290,13 @@ enum RaytracingMode
     RTM_DIFFUSE_WITH_SHADOWMAPS,
     RTM_DIFFUSE_WITH_SHADOWRAYS,
     RTM_REFLECTIONS,
+	RTM_PATHTRACE,                      // Path trace
+	RTM_PATHTRACE_DENOISED,             // Denoised path trace
 };
 EnumVar rayTracingMode("Application/Raytracing/RayTraceMode", RTM_DIFFUSE_WITH_SHADOWMAPS, _countof(rayTracingModes), rayTracingModes);
+
+ColorBuffer g_PathTraceOutputBuffer;    // Output buffer for path tracing results
+ColorBuffer g_DenoisedOutputBuffer;     // Output buffer for denoised path tracing results
 
 class DescriptorHeapStack
 {
@@ -588,7 +611,7 @@ void InitializeRaytracingStateObjects(const ModelH3D &model, UINT numMeshes)
 
     auto shaderConfigStateObject = stateObjectDesc.CreateSubobject<CD3DX12_RAYTRACING_SHADER_CONFIG_SUBOBJECT>();
     shaderConfigStateObject->Config(8, 8);
-
+    
     LPCWSTR hitGroupExportName = L"HitGroup";
     auto hitGroupSubobject = stateObjectDesc.CreateSubobject<CD3DX12_HIT_GROUP_SUBOBJECT>();
     hitGroupSubobject->SetHitGroupExport(hitGroupExportName);
@@ -680,6 +703,56 @@ void InitializeRaytracingStateObjects(const ModelH3D &model, UINT numMeshes)
         GetShaderTable(model, pReflectionPSO.Get(), pHitShaderTable.data());
         g_RaytracingInputs[Reflection] = RaytracingDispatchRayInputs(*g_pRaytracingDevice.Get(), pReflectionPSO.Get(), pHitShaderTable.data(), shaderRecordSizeInBytes, (UINT)pHitShaderTable.size(), rayGenExportName, missExportName);
     }
+   
+   {
+       // --- Path Tracing PSO ---
+	   // Create a new state object description for path tracing, based on the existing one
+	   CD3DX12_STATE_OBJECT_DESC pathTraceStateObjectDesc(D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE);
+
+	   auto ptNodeMaskSubobject = pathTraceStateObjectDesc.CreateSubobject<CD3DX12_NODE_MASK_SUBOBJECT>();
+	   ptNodeMaskSubobject->SetNodeMask(1);
+	   auto ptRootSignatureSubObject = pathTraceStateObjectDesc.CreateSubobject<CD3DX12_GLOBAL_ROOT_SIGNATURE_SUBOBJECT>();
+	   ptRootSignatureSubObject->SetRootSignature(g_GlobalRaytracingRootSignature.Get());
+	   auto ptConfigurationSubObject = pathTraceStateObjectDesc.CreateSubobject<CD3DX12_RAYTRACING_PIPELINE_CONFIG_SUBOBJECT>();
+	   ptConfigurationSubObject->Config(8);
+
+	   // Set the DXIL libraries for path tracing
+	   auto ptRayGenLib = pathTraceStateObjectDesc.CreateSubobject<CD3DX12_DXIL_LIBRARY_SUBOBJECT>();
+	   D3D12_SHADER_BYTECODE ptRayGenCode = CD3DX12_SHADER_BYTECODE(g_pPathTraceRayGen, sizeof(g_pPathTraceRayGen));
+	   ptRayGenLib->SetDXILLibrary(&ptRayGenCode);
+	   ptRayGenLib->DefineExport(L"PathTraceRayGen");
+
+	   auto ptHitLib = pathTraceStateObjectDesc.CreateSubobject<CD3DX12_DXIL_LIBRARY_SUBOBJECT>();
+	   D3D12_SHADER_BYTECODE ptHitCode = CD3DX12_SHADER_BYTECODE(g_pPathTraceHit, sizeof(g_pPathTraceHit));
+	   ptHitLib->SetDXILLibrary(&ptHitCode);
+	   ptHitLib->DefineExport(L"PathTraceHit");
+	   ptHitLib->DefineExport(L"ShadowAnyHit");
+
+	   auto ptMissLib = pathTraceStateObjectDesc.CreateSubobject<CD3DX12_DXIL_LIBRARY_SUBOBJECT>();
+	   D3D12_SHADER_BYTECODE ptMissCode = CD3DX12_SHADER_BYTECODE(g_pPathTraceMiss, sizeof(g_pPathTraceMiss));
+	   ptMissLib->SetDXILLibrary(&ptMissCode);
+	   ptMissLib->DefineExport(L"PathTraceMiss");
+	   ptMissLib->DefineExport(L"ShadowMiss");
+
+       auto ptShaderConfigStateObject = pathTraceStateObjectDesc.CreateSubobject<CD3DX12_RAYTRACING_SHADER_CONFIG_SUBOBJECT>();
+       ptShaderConfigStateObject->Config(sizeof(PathTraceRayPayload), 8); // Set the payload size for path tracing
+
+	   // Create the hit group for path tracing
+       auto ptHitGroupSubobject = pathTraceStateObjectDesc.CreateSubobject<CD3DX12_HIT_GROUP_SUBOBJECT>();
+       ptHitGroupSubobject->SetHitGroupExport(hitGroupExportName);
+       ptHitGroupSubobject->SetClosestHitShaderImport(L"PathTraceHit");
+       ptHitGroupSubobject->SetAnyHitShaderImport(L"ShadowAnyHit");
+
+       auto ptLocalRootSignatureSubObject = pathTraceStateObjectDesc.CreateSubobject<CD3DX12_LOCAL_ROOT_SIGNATURE_SUBOBJECT>();
+       ptLocalRootSignatureSubObject->SetRootSignature(g_LocalRaytracingRootSignature.Get());
+
+	   // Create the path tracing state object
+       ComPtr<ID3D12StateObject> pPathTracePSO;
+       g_pRaytracingDevice->CreateStateObject(pathTraceStateObjectDesc, IID_PPV_ARGS(&pPathTracePSO));
+
+       GetShaderTable(model, pPathTracePSO.Get(), pHitShaderTable.data());
+       g_RaytracingInputs[PathTrace] = RaytracingDispatchRayInputs(*g_pRaytracingDevice.Get(), pPathTracePSO.Get(), pHitShaderTable.data(), shaderRecordSizeInBytes, (UINT)pHitShaderTable.size(), L"PathTraceRayGen", L"PathTraceMiss");
+   }
 
    for (auto &raytracingPipelineState : g_RaytracingInputs)
    {
@@ -687,6 +760,8 @@ void InitializeRaytracingStateObjects(const ModelH3D &model, UINT numMeshes)
         swprintf_s(hitGroupExportNameClosestHitType, L"%s::closesthit", hitGroupExportName );
         SetPipelineStateStackSize(rayGenExportName, hitGroupExportNameClosestHitType, missExportName, MaxRayRecursion, raytracingPipelineState.m_pPSO.Get());
    }
+
+   SetPipelineStateStackSize(L"PathTraceRayGen", L"HitGroup::closesthit", L"PathTraceMiss", 8, g_RaytracingInputs[PathTrace].m_pPSO.Get());
 }
 
 void D3D12RaytracingMiniEngineSample::Startup( void )
@@ -924,20 +999,24 @@ void D3D12RaytracingMiniEngineSample::Update( float deltaT )
     else if (GameInput::IsFirstPressed(GameInput::kRShoulder))
         DebugZoom.Increment();
     else if(GameInput::IsFirstPressed(GameInput::kKey_1))
-      rayTracingMode = RTM_OFF;
+        rayTracingMode = RTM_OFF;
     else if(GameInput::IsFirstPressed(GameInput::kKey_2))
-      rayTracingMode = RTM_TRAVERSAL;
+        rayTracingMode = RTM_TRAVERSAL;
     else if(GameInput::IsFirstPressed(GameInput::kKey_3))
-      rayTracingMode = RTM_SSR;
+        rayTracingMode = RTM_SSR;
     else if(GameInput::IsFirstPressed(GameInput::kKey_4))
-      rayTracingMode = RTM_SHADOWS;
+        rayTracingMode = RTM_SHADOWS;
     else if(GameInput::IsFirstPressed(GameInput::kKey_5))
-      rayTracingMode = RTM_DIFFUSE_WITH_SHADOWMAPS;
+        rayTracingMode = RTM_DIFFUSE_WITH_SHADOWMAPS;
     else if(GameInput::IsFirstPressed(GameInput::kKey_6))
-      rayTracingMode = RTM_DIFFUSE_WITH_SHADOWRAYS;
+        rayTracingMode = RTM_DIFFUSE_WITH_SHADOWRAYS;
     else if(GameInput::IsFirstPressed(GameInput::kKey_7))
-      rayTracingMode = RTM_REFLECTIONS;
-    
+        rayTracingMode = RTM_REFLECTIONS;
+    else if(GameInput::IsFirstPressed(GameInput::kKey_8))   // Path trace
+        rayTracingMode = RTM_PATHTRACE;
+	else if(GameInput::IsFirstPressed(GameInput::kKey_9))   // Denoised path trace
+        rayTracingMode = RTM_PATHTRACE_DENOISED;
+
     static bool freezeCamera = false;
     
     if (GameInput::IsFirstPressed(GameInput::kKey_f))
@@ -995,15 +1074,19 @@ void D3D12RaytracingMiniEngineSample::SetCameraToPredefinedPosition(int cameraPo
 
 void D3D12RaytracingMiniEngineSample::RenderScene(void)
 {
-    const bool skipDiffusePass = 
+    const bool skipDiffusePass =
         rayTracingMode == RTM_DIFFUSE_WITH_SHADOWMAPS ||
         rayTracingMode == RTM_DIFFUSE_WITH_SHADOWRAYS ||
-        rayTracingMode == RTM_TRAVERSAL;
+        rayTracingMode == RTM_TRAVERSAL ||
+		rayTracingMode == RTM_PATHTRACE ||          // Skip diffuse rasterization for path tracing,
+		rayTracingMode == RTM_PATHTRACE_DENOISED;   // and denoised path tracing
         
     const bool skipShadowMap = 
         rayTracingMode == RTM_DIFFUSE_WITH_SHADOWRAYS ||
         rayTracingMode == RTM_TRAVERSAL ||
-        rayTracingMode == RTM_SSR;
+        rayTracingMode == RTM_SSR ||
+		rayTracingMode == RTM_PATHTRACE ||          // Skip shadow maps for path tracing,
+		rayTracingMode == RTM_PATHTRACE_DENOISED;   // and denoised path tracing
 
     GraphicsContext& gfxContext = GraphicsContext::Begin(L"Scene Render");
 
@@ -1352,8 +1435,102 @@ void D3D12RaytracingMiniEngineSample::Raytrace(class GraphicsContext& gfxContext
     case RTM_REFLECTIONS:
         RaytraceReflections(gfxContext, m_Camera, g_SceneColorBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);
         break;
+
+    case RTM_PATHTRACE:
+		Pathtrace(gfxContext, m_Camera, g_SceneColorBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);   // Render the path traced output directly to the scene color buffer
+        break;
+
+    case RTM_PATHTRACE_DENOISED:
+		Pathtrace(gfxContext, m_Camera, g_SceneColorBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);   // 1. Render the path traced output to a separate buffer
+		ApplyDenoisePass(gfxContext, g_PathTraceOutputBuffer, g_SceneColorBuffer);                      // 2. Denoise the path traced output and write it to the scene color buffer
+        break;
     }
 
     // Clear the gfxContext's descriptor heap since ray tracing changes this underneath the sheets
     gfxContext.SetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, nullptr);
+
+    gfxContext.TransitionResource(g_SceneColorBuffer, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+}
+
+void D3D12RaytracingMiniEngineSample::Pathtrace(
+    GraphicsContext& context,
+    const Math::Camera& camera,
+    ColorBuffer& colorTarget,
+    DepthBuffer& depth,
+    ColorBuffer& normals)
+{
+    ScopedTimer _p0(L"PathTrace", context);
+
+    // Prepare constants
+    DynamicCB inputs = g_dynamicCb;
+    auto m0 = camera.GetViewProjMatrix();
+	auto m1 = Invert(m0);
+    memcpy(&inputs.cameraToWorld, &m1, sizeof(inputs.cameraToWorld));
+    memcpy(&inputs.worldCameraPosition, &camera.GetPosition(), sizeof(inputs.worldCameraPosition));
+    inputs.resolution.x = (float)colorTarget.GetWidth();
+    inputs.resolution.y = (float)colorTarget.GetHeight();
+	inputs.FrameIndex = (uint32_t)Graphics::GetFrameCount(); // Used for random number generation in the shader
+
+    HitShaderConstants hitShaderConstants = {};
+    hitShaderConstants.sunDirection = Sponza::m_SunDirection;
+    hitShaderConstants.sunLight = Vector3(1.0f, 1.0f, 1.0f) * Sponza::m_SunLightIntensity;
+    hitShaderConstants.ambientLight = Vector3(1.0f, 1.0f, 1.0f) * Sponza::m_AmbientIntensity;
+    hitShaderConstants.ShadowTexelSize[0] = 1.0f / g_ShadowBuffer.GetWidth();
+    hitShaderConstants.modelToShadow = Transpose(Sponza::m_SunShadow.GetShadowMatrix());
+    hitShaderConstants.IsReflection = true;
+    hitShaderConstants.UseShadowRays = true;
+    context.WriteBuffer(g_hitConstantBuffer, 0, &hitShaderConstants, sizeof(hitShaderConstants));
+    context.WriteBuffer(g_dynamicConstantBuffer, 0, &inputs, sizeof(inputs));
+
+    context.TransitionResource(g_dynamicConstantBuffer, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    context.TransitionResource(g_SSAOFullScreen, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    context.TransitionResource(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    context.TransitionResource(g_ShadowBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    context.TransitionResource(normals, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    context.TransitionResource(g_hitConstantBuffer, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    context.TransitionResource(colorTarget, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    context.FlushResourceBarriers();
+
+    ID3D12GraphicsCommandList* pCommandList = context.GetCommandList();
+
+    ComPtr<ID3D12GraphicsCommandList4> pRaytracingCommandList;
+    pCommandList->QueryInterface(IID_PPV_ARGS(&pRaytracingCommandList));
+
+    ID3D12DescriptorHeap* pDescriptorHeaps[] = { &g_pRaytracingDescriptorHeap->GetDescriptorHeap() };
+    pRaytracingCommandList->SetDescriptorHeaps(ARRAYSIZE(pDescriptorHeaps), pDescriptorHeaps);
+
+    pCommandList->SetComputeRootSignature(g_GlobalRaytracingRootSignature.Get());
+    pCommandList->SetComputeRootDescriptorTable(0, g_SceneSrvs);
+    pCommandList->SetComputeRootConstantBufferView(1, g_hitConstantBuffer.GetGpuVirtualAddress());
+    pCommandList->SetComputeRootConstantBufferView(2, g_dynamicConstantBuffer.GetGpuVirtualAddress());
+    pCommandList->SetComputeRootDescriptorTable(3, g_DepthAndNormalsTable);
+    pCommandList->SetComputeRootDescriptorTable(4, g_OutputUAV);
+    pRaytracingCommandList->SetComputeRootShaderResourceView(7, g_bvh_topLevelAccelerationStructure->GetGPUVirtualAddress());
+
+	D3D12_DISPATCH_RAYS_DESC dispatchRaysDesc = g_RaytracingInputs[PathTrace].GetDispatchRayDesc(colorTarget.GetWidth(), colorTarget.GetHeight());
+	pRaytracingCommandList->SetPipelineState1(g_RaytracingInputs[PathTrace].m_pPSO.Get());
+    pRaytracingCommandList->DispatchRays(&dispatchRaysDesc);
+}
+
+void D3D12RaytracingMiniEngineSample::ApplyDenoisePass(
+    GraphicsContext& context,
+    ColorBuffer& input,
+    ColorBuffer& output)
+{
+    ScopedTimer _prof(L"PathTrace", context);
+
+    ComputeContext& computeContext = context.GetComputeContext();
+
+    computeContext.TransitionResource(input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    computeContext.TransitionResource(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    computeContext.SetRootSignature(m_DenoiseRS);
+    computeContext.SetPipelineState(m_DenoisePSO);
+
+    computeContext.SetDynamicDescriptor(0, 0, input.GetSRV());
+    computeContext.SetDynamicDescriptor(1, 0, output.GetUAV());
+
+    uint32_t dispatchX = Math::DivideByMultiple(output.GetWidth(), 8);
+    uint32_t dispatchY = Math::DivideByMultiple(output.GetHeight(), 8);
+    computeContext.Dispatch(dispatchX, dispatchY, 1);
 }

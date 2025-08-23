@@ -17,9 +17,20 @@ struct DynamicCB
 {
     float4x4 cameraToWorld;
     float3   worldCameraPosition;
-    uint     padding;
+	uint     FrameIndex; // padding -> FrameIndex : Used for random number generation in the shader
     float2   resolution;
 };
+
+struct PathTraceRayPayload
+{
+    float4  color;
+    uint    recursionDepth;
+    float3  albedo;
+    float3  worldPos;
+    float3  normal;
+    uint    isHit;
+};
+
 #ifdef HLSL
 #ifndef SINGLE
 static const float FLT_MAX = asfloat(0x7F7FFFFF);
