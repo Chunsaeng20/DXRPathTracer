@@ -792,6 +792,19 @@ void D3D12RaytracingMiniEngineSample::Startup( void )
     g_hitConstantBuffer.Create(L"Hit Constant Buffer", 1, sizeof(HitShaderConstants));
     g_dynamicConstantBuffer.Create(L"Dynamic Constant Buffer", 1, sizeof(DynamicCB));
 
+	// The output buffer for path tracing
+    g_PathTraceOutputBuffer.Create(L"Path Trace Output Buffer", g_SceneColorBuffer.GetWidth(), g_SceneColorBuffer.GetHeight(), 1, g_SceneColorBuffer.GetFormat(), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+	// Create Root Signature and Pipeline State Object for Denoiser
+    m_DenoiseRS.Reset(2, 0);
+	m_DenoiseRS[0].InitAsDescriptorRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 0, 1); // Input texture (t0)
+	m_DenoiseRS[1].InitAsDescriptorRange(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 0, 1); // Output texture (u0)
+    m_DenoiseRS.Finalize(L"Denoise Root Signature");
+
+    m_DenoisePSO.SetRootSignature(m_DenoiseRS);
+    m_DenoisePSO.SetComputeShader(g_pDenoiseCS, sizeof(g_pDenoiseCS));
+    m_DenoisePSO.Finalize();
+
     //
     // Load the model
     //
@@ -981,6 +994,7 @@ void D3D12RaytracingMiniEngineSample::Startup( void )
 
 void D3D12RaytracingMiniEngineSample::Cleanup( void )
 {
+	g_PathTraceOutputBuffer.Destroy();
     Sponza::Cleanup();
     Renderer::Shutdown();
 }
@@ -1437,12 +1451,19 @@ void D3D12RaytracingMiniEngineSample::Raytrace(class GraphicsContext& gfxContext
         break;
 
     case RTM_PATHTRACE:
-		Pathtrace(gfxContext, m_Camera, g_SceneColorBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);   // Render the path traced output directly to the scene color buffer
+		Pathtrace(gfxContext, m_Camera, g_SceneColorBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);       // Render the path traced output directly to the scene color buffer
         break;
 
     case RTM_PATHTRACE_DENOISED:
-		Pathtrace(gfxContext, m_Camera, g_SceneColorBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);   // 1. Render the path traced output to a separate buffer
-		ApplyDenoisePass(gfxContext, g_PathTraceOutputBuffer, g_SceneColorBuffer);                      // 2. Denoise the path traced output and write it to the scene color buffer
+		Pathtrace(gfxContext, m_Camera, g_PathTraceOutputBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);  // 1. Render the path traced output to a separate buffer
+        
+		// Ensure UAV writes are finished before reading from the buffer
+		gfxContext.InsertUAVBarrier(g_PathTraceOutputBuffer);
+
+		// Set the descriptor heap to the one containing the texture descriptors
+        gfxContext.SetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, Renderer::s_TextureHeap.GetHeapPointer());
+
+		ApplyDenoisePass(gfxContext, g_PathTraceOutputBuffer, g_SceneColorBuffer);                          // 2. Denoise the path traced output and write it to the scene color buffer
         break;
     }
 
@@ -1517,19 +1538,24 @@ void D3D12RaytracingMiniEngineSample::ApplyDenoisePass(
     ColorBuffer& input,
     ColorBuffer& output)
 {
-    ScopedTimer _prof(L"PathTrace", context);
+    ScopedTimer _prof(L"Apply Denoise Pass", context);
 
     ComputeContext& computeContext = context.GetComputeContext();
 
+	// Transition resources
     computeContext.TransitionResource(input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     computeContext.TransitionResource(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+	// Set the compute root signature and pipeline state
     computeContext.SetRootSignature(m_DenoiseRS);
     computeContext.SetPipelineState(m_DenoisePSO);
 
+	// Set the descriptors
+	context.SetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, Renderer::s_TextureHeap.GetHeapPointer());
     computeContext.SetDynamicDescriptor(0, 0, input.GetSRV());
     computeContext.SetDynamicDescriptor(1, 0, output.GetUAV());
 
+	// Dispatch the compute shader
     uint32_t dispatchX = Math::DivideByMultiple(output.GetWidth(), 8);
     uint32_t dispatchY = Math::DivideByMultiple(output.GetHeight(), 8);
     computeContext.Dispatch(dispatchX, dispatchY, 1);
