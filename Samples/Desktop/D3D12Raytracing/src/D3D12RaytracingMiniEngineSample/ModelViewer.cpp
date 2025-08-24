@@ -72,6 +72,7 @@ __declspec(align(16)) struct HitShaderConstants
     Matrix4 modelToShadow;
     UINT32 IsReflection;
     UINT32 UseShadowRays;
+	float sunRadius; // Size of the sun (for soft shadows)
 };
 
 ByteAddressBuffer          g_hitConstantBuffer;
@@ -200,7 +201,7 @@ private:
     // Render the scene using path tracing
 	void Pathtrace(GraphicsContext& context, const Math::Camera& camera, ColorBuffer& colorTarget, DepthBuffer& depth, ColorBuffer& normals);
     // Apply a denoising pass to the input buffer and output the result to the output buffer
-	void ApplyDenoisePass(GraphicsContext& context, ColorBuffer& input, ColorBuffer& output);
+    void ApplyDenoisePass(GraphicsContext& context, ColorBuffer& input, ColorBuffer& output);
 
     Camera m_Camera;
     std::unique_ptr<FlyingFPSCamera> m_CameraController;
@@ -279,7 +280,7 @@ const char* rayTracingModes[] = {
     "Diffuse&ShadowRays",
     "Reflection Rays",
     "Path Trace",                       // Path trace
-	"Path Trace + Denoise (Blur)"       // Denoised path trace
+	"Denoised Path Trace"               // Denoised path trace
 };
 enum RaytracingMode
 {
@@ -863,7 +864,7 @@ void D3D12RaytracingMiniEngineSample::Startup( void )
 
         D3D12_RAYTRACING_GEOMETRY_DESC &desc = geometryDescs[i];
         desc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-        desc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+		desc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE; // D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE -> D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : Allow any hit shader to be invoked for alpha tested geometry
 
         D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC &trianglesDesc = desc.Triangles;
         trianglesDesc.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
@@ -1456,11 +1457,11 @@ void D3D12RaytracingMiniEngineSample::Raytrace(class GraphicsContext& gfxContext
 
     case RTM_PATHTRACE_DENOISED:
 		Pathtrace(gfxContext, m_Camera, g_PathTraceOutputBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);  // 1. Render the path traced output to a separate buffer
-        
-		// Ensure UAV writes are finished before reading from the buffer
-		gfxContext.InsertUAVBarrier(g_PathTraceOutputBuffer);
 
-		// Set the descriptor heap to the one containing the texture descriptors
+        // Ensure UAV writes are finished before reading from the buffer
+        gfxContext.InsertUAVBarrier(g_PathTraceOutputBuffer);
+
+        // Set the descriptor heap to the one containing the texture descriptors
         gfxContext.SetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, Renderer::s_TextureHeap.GetHeapPointer());
 
 		ApplyDenoisePass(gfxContext, g_PathTraceOutputBuffer, g_SceneColorBuffer);                          // 2. Denoise the path traced output and write it to the scene color buffer
@@ -1500,6 +1501,7 @@ void D3D12RaytracingMiniEngineSample::Pathtrace(
     hitShaderConstants.modelToShadow = Transpose(Sponza::m_SunShadow.GetShadowMatrix());
     hitShaderConstants.IsReflection = true;
     hitShaderConstants.UseShadowRays = true;
+	hitShaderConstants.sunRadius = 0.005f; // Size of the sun (for soft shadows)
     context.WriteBuffer(g_hitConstantBuffer, 0, &hitShaderConstants, sizeof(hitShaderConstants));
     context.WriteBuffer(g_dynamicConstantBuffer, 0, &inputs, sizeof(inputs));
 
@@ -1542,20 +1544,19 @@ void D3D12RaytracingMiniEngineSample::ApplyDenoisePass(
 
     ComputeContext& computeContext = context.GetComputeContext();
 
-	// Transition resources
+    // Transition resources
     computeContext.TransitionResource(input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     computeContext.TransitionResource(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-	// Set the compute root signature and pipeline state
+    // Set the compute root signature and pipeline state
     computeContext.SetRootSignature(m_DenoiseRS);
     computeContext.SetPipelineState(m_DenoisePSO);
 
-	// Set the descriptors
-	context.SetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, Renderer::s_TextureHeap.GetHeapPointer());
+    // Set the descriptors
     computeContext.SetDynamicDescriptor(0, 0, input.GetSRV());
     computeContext.SetDynamicDescriptor(1, 0, output.GetUAV());
 
-	// Dispatch the compute shader
+    // Dispatch the compute shader
     uint32_t dispatchX = Math::DivideByMultiple(output.GetWidth(), 8);
     uint32_t dispatchY = Math::DivideByMultiple(output.GetHeight(), 8);
     computeContext.Dispatch(dispatchX, dispatchY, 1);

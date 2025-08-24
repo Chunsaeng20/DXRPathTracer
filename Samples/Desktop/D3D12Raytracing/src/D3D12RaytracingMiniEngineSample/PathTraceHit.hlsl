@@ -235,5 +235,31 @@ void PathTraceHit(inout PathTraceRayPayload payload, in BuiltInTriangleIntersect
 [shader("anyhit")]
 void ShadowAnyHit(inout PathTraceRayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
-    payload.isHit = 1;
+    // Test alpha texture and potentially ignore the hit
+    uint materialID = MaterialID;
+    uint triangleID = PrimitiveIndex();
+
+    RayTraceMeshInfo info = g_meshInfo[materialID];
+
+    const uint3 ii = Load3x16BitIndices(info.m_indexOffsetBytes + PrimitiveIndex() * 3 * 2);
+    const float2 uv0 = GetUVAttribute(info.m_uvAttributeOffsetBytes + ii.x * info.m_attributeStrideBytes);
+    const float2 uv1 = GetUVAttribute(info.m_uvAttributeOffsetBytes + ii.y * info.m_attributeStrideBytes);
+    const float2 uv2 = GetUVAttribute(info.m_uvAttributeOffsetBytes + ii.z * info.m_attributeStrideBytes);
+
+    float3 bary = float3(1.0 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
+    float2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
+    
+    float4 textureColor = g_localTexture.SampleLevel(g_s0, uv, 0);
+    
+    if (textureColor.a < 0.5f)
+    {
+        IgnoreHit();
+        return;
+    }
+    
+    // if we hit opaque geometry, report the shadow
+    if (payload.isShadowRay)
+    {
+        AcceptHitAndEndSearch();
+    }
 }

@@ -31,6 +31,7 @@ struct PathTraceRayPayload
     uint    isHit;
 	float   roughness;
     float   metalic;
+	uint    isShadowRay;
 };
 
 #ifdef HLSL
@@ -51,6 +52,7 @@ cbuffer HitShaderConstants : register(b0)
     float4x4 ModelToShadow;
     uint IsReflection;
     uint UseShadowRays;
+	float SunRadius; // Size of the sun (for soft shadows)
 }
 
 cbuffer b1 : register(b1)

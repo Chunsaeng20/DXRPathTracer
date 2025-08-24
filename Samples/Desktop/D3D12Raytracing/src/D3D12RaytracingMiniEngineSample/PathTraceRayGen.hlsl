@@ -38,11 +38,28 @@ float3 SampleHemisphere(float3 normal, uint2 pixelCoord, uint frameIndex, inout 
     return x * tangent + cos_theta * normal + z * bitangent;
 }
 
+// Schlick's approximation for Fresnel factor
 float schlick(float cosine, float ref_idx)
 {
     float r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
     r0 = r0 * r0;
     return r0 + (1.0 - r0) * pow((1.0 - cosine), 5.0);
+}
+
+// Sample a point on a disk representing the directional light source
+float3 SampleDirectionalLight(float3 centerDirection, float lightRadius, uint2 pixelCoord, uint frameIndex, inout uint sampleIndex)
+{
+    float3 u = abs(centerDirection.y) > 0.999 ? float3(1, 0, 0) : normalize(cross(centerDirection, float3(0, 1, 0)));
+    float3 v = cross(centerDirection, u);
+    
+    float r1 = random_float(pixelCoord, frameIndex, sampleIndex++);
+    float r2 = random_float(pixelCoord, frameIndex, sampleIndex++);
+    
+    float radius = sqrt(r1);
+    float theta = 2.0 * 3.14159265 * r2;
+    float2 pointOnLightDisk = float2(radius * cos(theta), radius * sin(theta));
+    
+    return normalize(centerDirection + (pointOnLightDisk.x * u + pointOnLightDisk.y * v) * lightRadius);
 }
 
 // --- Helper functions end here ---
@@ -68,6 +85,7 @@ void PathTraceRayGen()
     {
         PathTraceRayPayload payload;
         payload.recursionDepth = i;
+        payload.isShadowRay = 0;
 
         TraceRay(g_accel, RAY_FLAG_NONE, 0xFF, 0, 1, 0, rayDesc, payload);
         
@@ -82,16 +100,17 @@ void PathTraceRayGen()
         // Physically not accurate, but more bright
         if (i == 0)
         {
-            finalColor += payload.albedo * AmbientColor * 0.1f;
+            finalColor += payload.albedo * AmbientColor * 0.2f;
         }
 
 		// --- Next Event Estimation: Direct Light Sampling ---
-            float3 lightDir = SunDirection;
+        float3 lightDir = SampleDirectionalLight(normalize(SunDirection), SunRadius, dispatchIdx, g_dynamic.FrameIndex, sampleIndex);
 		float3 shadowRayOrigin = payload.worldPos + payload.normal * 0.001f;
 		RayDesc shadowRayDesc = { shadowRayOrigin, 0.001f, lightDir, 1.0e9f };
         
         PathTraceRayPayload shadowPayload;
 		shadowPayload.isHit = 0;
+        shadowPayload.isShadowRay = 1;
         TraceRay(g_accel, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 1, 0, shadowRayDesc, shadowPayload);
 
         if (!shadowPayload.isHit)
