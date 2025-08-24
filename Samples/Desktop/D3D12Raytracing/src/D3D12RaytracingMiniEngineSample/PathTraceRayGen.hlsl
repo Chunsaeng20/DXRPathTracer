@@ -79,9 +79,9 @@ void PathTraceRayGen()
 
         TraceRay(g_accel, RAY_FLAG_NONE, 0xFF, 0, 1, 0, rayDesc, payload);
         
+        // Miss - add sky color, then terminate
         if (!payload.isHit)
-        {
-			// Miss - add sky color, then terminate
+        {			
             finalColor += throughput * payload.color.xyz;
             break;
         }

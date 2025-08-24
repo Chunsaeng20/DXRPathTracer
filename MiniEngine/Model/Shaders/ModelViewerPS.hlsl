@@ -37,7 +37,7 @@ struct VSOutput
 struct MRT
 {
 	float3 Color : SV_Target0;
-	float4 Normal : SV_Target1;	// float3 -> float4 : Use w channel for raytracing reflection
+	float4 Normal : SV_Target1;	// float3 -> float4 : W channel for raytracing reflection
 };
 
 [RootSignature(Renderer_RootSig)]
@@ -80,7 +80,7 @@ MRT main(VSOutput vsOutput)
 		);
 
 	float reflectivity = specularMask > 0.1f ? 1.0f : 0.0f;	// if specularMask is low, no reflection
-	mrt.Normal = float4(normal, reflectivity);				// normal -> float4(normal, reflectivity) : Use w channel for raytracing reflection
+	mrt.Normal = float4(normal, reflectivity);				// normal -> float4(normal, reflectivity) : W channel for raytracing reflection
 	mrt.Color = colorSum;
 	return mrt;
 }
