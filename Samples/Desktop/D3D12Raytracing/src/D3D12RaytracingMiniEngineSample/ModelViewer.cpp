@@ -107,6 +107,9 @@ const static UINT MaxRayRecursion = 2;
 
 const static UINT c_NumCameraPositions = 5;
 
+ColorBuffer g_PathTraceOutputBuffer;        // Temporary output buffer for denoised path trace
+D3D12_GPU_DESCRIPTOR_HANDLE g_OutputUAV2;   // Descriptor handle for denoised path trace
+
 struct RaytracingDispatchRayInputs
 {
     RaytracingDispatchRayInputs() {}
@@ -265,8 +268,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE /*hPrevInstance
 
     //s_EnableVSync.Decrement();
     //TargetResolution = k720p;
-    //g_DisplayWidth = 1280;
-    //g_DisplayHeight = 720;
+    g_DisplayWidth = 1280;
+    g_DisplayHeight = 720;
     GameCore::RunApplication(D3D12RaytracingMiniEngineSample(), L"D3D12RaytracingMiniEngineSample", hInstance, nCmdShow); 
     return 0;
 }
@@ -279,8 +282,8 @@ const char* rayTracingModes[] = {
     "Diffuse&ShadowMaps",
     "Diffuse&ShadowRays",
     "Reflection Rays",
-    "Path Trace",                       // Path trace
-	"Denoised Path Trace"               // Denoised path trace
+    "Path Trace",                   // Path trace
+	"Denoised Path Trace"           // Denoised path trace
 };
 enum RaytracingMode
 {
@@ -291,13 +294,10 @@ enum RaytracingMode
     RTM_DIFFUSE_WITH_SHADOWMAPS,
     RTM_DIFFUSE_WITH_SHADOWRAYS,
     RTM_REFLECTIONS,
-	RTM_PATHTRACE,                      // Path trace
-	RTM_PATHTRACE_DENOISED,             // Denoised path trace
+	RTM_PATHTRACE,                  // Path trace
+	RTM_PATHTRACE_DENOISED,         // Denoised path trace
 };
 EnumVar rayTracingMode("Application/Raytracing/RayTraceMode", RTM_DIFFUSE_WITH_SHADOWMAPS, _countof(rayTracingModes), rayTracingModes);
-
-ColorBuffer g_PathTraceOutputBuffer;    // Output buffer for path tracing results
-ColorBuffer g_DenoisedOutputBuffer;     // Output buffer for denoised path tracing results
 
 class DescriptorHeapStack
 {
@@ -409,6 +409,13 @@ void InitializeViews(const ModelH3D& model)
     g_pRaytracingDescriptorHeap->AllocateDescriptor(uavHandle, uavDescriptorIndex);
     Graphics::g_Device->CopyDescriptorsSimple(1, uavHandle, g_SceneColorBuffer.GetUAV(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     g_OutputUAV = g_pRaytracingDescriptorHeap->GetGpuHandle(uavDescriptorIndex);
+
+    // --- Descriptor handle for denoised path trace ---
+    D3D12_CPU_DESCRIPTOR_HANDLE uavHandle2;
+    UINT uavDescriptorIndex2;
+    g_pRaytracingDescriptorHeap->AllocateDescriptor(uavHandle2, uavDescriptorIndex2);
+    Graphics::g_Device->CopyDescriptorsSimple(1, uavHandle2, g_PathTraceOutputBuffer.GetUAV(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    g_OutputUAV2 = g_pRaytracingDescriptorHeap->GetGpuHandle(uavDescriptorIndex2);
 
     {
         D3D12_CPU_DESCRIPTOR_HANDLE srvHandle;
@@ -1457,13 +1464,6 @@ void D3D12RaytracingMiniEngineSample::Raytrace(class GraphicsContext& gfxContext
 
     case RTM_PATHTRACE_DENOISED:
 		Pathtrace(gfxContext, m_Camera, g_PathTraceOutputBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);  // 1. Render the path traced output to a separate buffer
-
-        // Ensure UAV writes are finished before reading from the buffer
-        gfxContext.InsertUAVBarrier(g_PathTraceOutputBuffer);
-
-        // Set the descriptor heap to the one containing the texture descriptors
-        gfxContext.SetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, Renderer::s_TextureHeap.GetHeapPointer());
-
 		ApplyDenoisePass(gfxContext, g_PathTraceOutputBuffer, g_SceneColorBuffer);                          // 2. Denoise the path traced output and write it to the scene color buffer
         break;
     }
@@ -1527,7 +1527,8 @@ void D3D12RaytracingMiniEngineSample::Pathtrace(
     pCommandList->SetComputeRootConstantBufferView(1, g_hitConstantBuffer.GetGpuVirtualAddress());
     pCommandList->SetComputeRootConstantBufferView(2, g_dynamicConstantBuffer.GetGpuVirtualAddress());
     pCommandList->SetComputeRootDescriptorTable(3, g_DepthAndNormalsTable);
-    pCommandList->SetComputeRootDescriptorTable(4, g_OutputUAV);
+    auto g_OutputUAVHandle = (rayTracingMode == RTM_PATHTRACE) ? g_OutputUAV : g_OutputUAV2;
+    pCommandList->SetComputeRootDescriptorTable(4, g_OutputUAVHandle);
     pRaytracingCommandList->SetComputeRootShaderResourceView(7, g_bvh_topLevelAccelerationStructure->GetGPUVirtualAddress());
 
 	D3D12_DISPATCH_RAYS_DESC dispatchRaysDesc = g_RaytracingInputs[PathTrace].GetDispatchRayDesc(colorTarget.GetWidth(), colorTarget.GetHeight());
@@ -1541,6 +1542,12 @@ void D3D12RaytracingMiniEngineSample::ApplyDenoisePass(
     ColorBuffer& output)
 {
     ScopedTimer _prof(L"Apply Denoise Pass", context);
+
+    // Ensure UAV writes are finished before reading from the buffer
+    context.InsertUAVBarrier(input);
+
+    // Set the descriptor heap to the one containing the texture descriptors
+    context.SetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, Renderer::s_TextureHeap.GetHeapPointer());
 
     ComputeContext& computeContext = context.GetComputeContext();
 
@@ -1557,7 +1564,5 @@ void D3D12RaytracingMiniEngineSample::ApplyDenoisePass(
     computeContext.SetDynamicDescriptor(1, 0, output.GetUAV());
 
     // Dispatch the compute shader
-    uint32_t dispatchX = Math::DivideByMultiple(output.GetWidth(), 8);
-    uint32_t dispatchY = Math::DivideByMultiple(output.GetHeight(), 8);
-    computeContext.Dispatch(dispatchX, dispatchY, 1);
+    computeContext.Dispatch2D(output.GetWidth(), output.GetHeight());
 }
