@@ -204,7 +204,7 @@ private:
     // Render the scene using path tracing
 	void Pathtrace(GraphicsContext& context, const Math::Camera& camera, ColorBuffer& colorTarget, DepthBuffer& depth, ColorBuffer& normals);
     // Apply a denoising pass to the input buffer and output the result to the output buffer
-    void ApplyDenoisePass(GraphicsContext& context, ColorBuffer& input, ColorBuffer& output);
+    void ApplyDenoisePass(GraphicsContext& context, ColorBuffer& input, ColorBuffer& output, DepthBuffer& depth, ColorBuffer& normals);
 
     Camera m_Camera;
     std::unique_ptr<FlyingFPSCamera> m_CameraController;
@@ -268,8 +268,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE /*hPrevInstance
 
     //s_EnableVSync.Decrement();
     //TargetResolution = k720p;
-    g_DisplayWidth = 1280;
-    g_DisplayHeight = 720;
+    //g_DisplayWidth = 1280;
+    //g_DisplayHeight = 720;
     GameCore::RunApplication(D3D12RaytracingMiniEngineSample(), L"D3D12RaytracingMiniEngineSample", hInstance, nCmdShow); 
     return 0;
 }
@@ -804,9 +804,11 @@ void D3D12RaytracingMiniEngineSample::Startup( void )
     g_PathTraceOutputBuffer.Create(L"Path Trace Output Buffer", g_SceneColorBuffer.GetWidth(), g_SceneColorBuffer.GetHeight(), 1, g_SceneColorBuffer.GetFormat(), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
 	// Create Root Signature and Pipeline State Object for Denoiser
-    m_DenoiseRS.Reset(2, 0);
-	m_DenoiseRS[0].InitAsDescriptorRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 0, 1); // Input texture (t0)
-	m_DenoiseRS[1].InitAsDescriptorRange(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 0, 1); // Output texture (u0)
+    m_DenoiseRS.Reset(3, 1);
+    m_DenoiseRS[0].InitAsConstantBuffer(0); // b0
+	m_DenoiseRS[1].InitAsDescriptorRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 0, 3); // t0, t1, t2
+	m_DenoiseRS[2].InitAsDescriptorRange(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 0, 1); // u0
+    m_DenoiseRS.InitStaticSampler(0, SamplerLinearClampDesc); // s0
     m_DenoiseRS.Finalize(L"Denoise Root Signature");
 
     m_DenoisePSO.SetRootSignature(m_DenoiseRS);
@@ -1459,12 +1461,15 @@ void D3D12RaytracingMiniEngineSample::Raytrace(class GraphicsContext& gfxContext
         break;
 
     case RTM_PATHTRACE:
-		Pathtrace(gfxContext, m_Camera, g_SceneColorBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);       // Render the path traced output directly to the scene color buffer
+        // Render the path traced output directly to the scene color buffer
+		Pathtrace(gfxContext, m_Camera, g_SceneColorBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);
         break;
 
     case RTM_PATHTRACE_DENOISED:
-		Pathtrace(gfxContext, m_Camera, g_PathTraceOutputBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);  // 1. Render the path traced output to a separate buffer
-		ApplyDenoisePass(gfxContext, g_PathTraceOutputBuffer, g_SceneColorBuffer);                          // 2. Denoise the path traced output and write it to the scene color buffer
+        // 1. Render the path traced output to a separate buffer
+        Pathtrace(gfxContext, m_Camera, g_PathTraceOutputBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);
+        // 2. Denoise the path traced output and write it to the scene color buffer
+		ApplyDenoisePass(gfxContext, g_PathTraceOutputBuffer, g_SceneColorBuffer, g_SceneDepthBuffer, g_SceneNormalBuffer);
         break;
     }
 
@@ -1539,7 +1544,9 @@ void D3D12RaytracingMiniEngineSample::Pathtrace(
 void D3D12RaytracingMiniEngineSample::ApplyDenoisePass(
     GraphicsContext& context,
     ColorBuffer& input,
-    ColorBuffer& output)
+    ColorBuffer& output,
+    DepthBuffer& depth,
+    ColorBuffer& normals)
 {
     ScopedTimer _prof(L"Apply Denoise Pass", context);
 
@@ -1554,14 +1561,30 @@ void D3D12RaytracingMiniEngineSample::ApplyDenoisePass(
     // Transition resources
     computeContext.TransitionResource(input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     computeContext.TransitionResource(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    computeContext.TransitionResource(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    computeContext.TransitionResource(normals, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     // Set the compute root signature and pipeline state
     computeContext.SetRootSignature(m_DenoiseRS);
     computeContext.SetPipelineState(m_DenoisePSO);
 
+    // Set the constant buffer
+    __declspec(align(16)) struct
+    {
+        float depthWeight;
+        float normalWeight;
+        float colorWeight;
+    } constants = { 2.0f, 16.0f, 4.0f };
+    computeContext.SetDynamicConstantBufferView(0, sizeof(constants), &constants);
+
     // Set the descriptors
-    computeContext.SetDynamicDescriptor(0, 0, input.GetSRV());
-    computeContext.SetDynamicDescriptor(1, 0, output.GetUAV());
+    D3D12_CPU_DESCRIPTOR_HANDLE SRVs[] = {
+        input.GetSRV(),
+        depth.GetDepthSRV(),
+        normals.GetSRV()
+    };
+    computeContext.SetDynamicDescriptors(1, 0, 3, SRVs);
+    computeContext.SetDynamicDescriptor(2, 0, output.GetUAV());
 
     // Dispatch the compute shader
     computeContext.Dispatch2D(output.GetWidth(), output.GetHeight());
