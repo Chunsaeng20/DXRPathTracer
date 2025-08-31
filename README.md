@@ -23,7 +23,7 @@ The keys '1'...'7' can also be used to cycle through different modes (or using B
 * (New) "Path Tracing" - [8] Fully-pathtraced pass that recursively shoots primary rays for diffuse lights
 * (New) "Denoised Path Tracing" - [9] Simple 3x3 box blur denoised path tracing
 
-## Controls:
+## Controls
 * forward/backward/strafe: left thumbstick or WASD (FPS controls)
 * up/down: triggers or E/Q
 * yaw/pitch: right thumbstick or mouse
@@ -32,6 +32,13 @@ The keys '1'...'7' can also be used to cycle through different modes (or using B
 * navigate debug menu: dpad or arrow keys
 * toggle debug menu item: A button or return
 * adjust debug menu value: dpad left/right or left/right arrow keys
+
+## Main Files
+* ModelViewer.cpp
+* PathTraceRayGen.hlsl
+* PathTraceHit.hlsl
+* PathTraceMiss.hlsl
+* DenoiseCS.hlsl
 
 ## Requirements
 Same as [DirectX-Graphics-Samples (main branch)](https://github.com/microsoft/DirectX-Graphics-Samples)
