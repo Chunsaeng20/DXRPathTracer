@@ -1,6 +1,6 @@
 # DXRPathTracer
 ![PathTracer Screenshot](Screenshot.png)
-A simple path tracer using the MiniEngine from DirectX-Graphics-Samples
+A simple path tracer using the MiniEngine from [DirectX-Graphics-Samples](https://github.com/microsoft/DirectX-Graphics-Samples)
 
 ## Getting started
 * Open DXRPathTracer/Samples/Desktop/D3D12Raytracing/src/D3D12Raytracing.sln
@@ -12,7 +12,7 @@ A simple path tracer using the MiniEngine from DirectX-Graphics-Samples
 
 This is a modified version of MiniEngine that uses the DirectX Raytracing for a series of effects.
 
-The keys '1'...'7' can also be used to cycle through different modes (or using Backspace to open up the MiniEngine and going to Application/Raytracing/RaytraceMode): 
+The keys '1'...'9' can also be used to cycle through different modes (or using Backspace to open up the MiniEngine and going to Application/Raytracing/RaytraceMode): 
 * *Off* - [1] Full rasterization.
 * *Bary Rays* - [2] Primary rays that return the barycentric of the intersected triangle.
 * (Broken) *Refl Bary* - [3] Secondary reflection rays that return the barycentric of the intersected triangle.
@@ -21,7 +21,7 @@ The keys '1'...'7' can also be used to cycle through different modes (or using B
 * *Diffuse&ShadowRays* - [6] Fully-raytraced pass that shoots primary rays for diffuse lights and recursively fires shadow rays.
 * *Reflection Rays* - [7] Hybrid pass that renders primary diffuse with rasterization and if the ground plane is detected, fires of reflections rays.
 * (New) "Path Tracing" - [8] Fully-pathtraced pass that recursively shoots primary rays for diffuse lights
-* (New) "Denoised Path Tracing" - [9] Simple 3x3 box blur denoised path tracing
+* (New) "Denoised Path Tracing" - [9] Denoised path tracing with simple 3x3 box blur
 
 ## Controls
 * forward/backward/strafe: left thumbstick or WASD (FPS controls)
